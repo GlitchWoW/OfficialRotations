@@ -1,0 +1,1 @@
+Renewing Mist no long needs to be bound. 0x33 has fixed it.
