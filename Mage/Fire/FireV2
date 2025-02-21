@@ -1,0 +1,1440 @@
+game_api = require("lib")
+spells = require("spells")
+talents = require("talents")
+auras = require("auras")
+settings = require("settings")
+API = require("common_functions")
+cLists = require("common_lists")
+state = {}
+
+--[[
+    Create your variable and toggle here
+]]
+function OnInit()
+    settings.createSettings()
+    print("Fire go REEEEEE - v3.1!")
+end
+
+
+local BloodlustExhaustSpells = {57724, 57723, 80354, 264689, 390435}
+
+function hasBloodlustExhaustion()
+    for _, spellID in ipairs(BloodlustExhaustSpells) do
+        if game_api.currentPlayerHasAura(spellID, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local BloodlustAuras = {
+    2825,    -- Shaman: Bloodlust (Horde)
+    32182,   -- Shaman: Heroism (Alliance)
+    80353,   -- Mage: Time Warp
+    90355,   -- Hunter: Ancient Hysteria
+    160452,  -- Hunter: Netherwinds
+    264667,  -- Hunter: Primal Rage
+    390386,  -- Evoker: Fury of the Aspects
+    -- Drums
+    35475,   -- Drums of War (Cata)
+    35476,   -- Drums of Battle (Cata)
+    146555,  -- Drums of Rage (MoP)
+    178207,  -- Drums of Fury (WoD)
+    230935,  -- Drums of the Mountain (Legion)
+    256740,  -- Drums of the Maelstrom (BfA)
+    309658,  -- Drums of Deathly Ferocity (SL)
+    381301,  -- Feral Hide Drums (DF)
+}
+local PolymorphAuras = {
+    polymorph = 118,
+    polymorphTurtle = 28271,
+    polymorphPig = 28272,
+    polymorphSnake = 61025,
+    polymorphBlackCat = 61305,
+    polymorphTurkey = 61780,
+    polymorphRabbit = 61721,
+    polymorphPorcupine = 126819,
+    polymorphPolarBearCub = 161353,
+    polymorphMonkey = 161354,
+    polymorphPenguin = 161355,
+    polymorphPeacock = 161372,
+    polymorphBabyDirehorn = 277787,
+    polymorphBumblebee = 277792,
+    polymorphMawrat = 321395,
+    polymorphDuck = 391622
+}
+
+function getCombatUnitsCount(range)
+    local units = state.getUnits
+    local combatUnits = {}
+    local insert = table.insert
+
+    for _, unit in ipairs(units) do
+        if game_api.distanceBetweenUnits(state.currentTarget,unit) <= range and
+            game_api.unitHealthPercent(unit) > 0 then
+            insert(combatUnits, unit)
+        end
+    end
+    local numberOfUnits = #combatUnits
+    return numberOfUnits
+end
+
+
+
+function getCombatUnits()
+    local units = game_api.getHostileUnits()
+    local combatUnits = {}
+    local insert = table.insert
+
+    for _, unit in ipairs(units) do
+        if API.isInCombatOrHasNpcId(unit, cLists.npcIdList) and
+        game_api.unitHealthPercent(unit) > 0 and API.IsInRange(40,unit) and not API.ignoreUnit(unit) and not API.hasImmunity(unit) then
+            insert(combatUnits, unit)
+        end
+    end
+    if game_api.getToggle(settings.forceST) then
+        combatUnits = {state.currentTarget}
+    end
+    return combatUnits
+end
+
+
+
+local VarKindlingReduction = (game_api.hasTalentEntry(talents.Kindling)) and 0.4 or 1
+local VarSKBMaxStack = 10
+local VarImprovedScorchMaxStack = 2
+local VarFirestarterCombusion = false
+local VarHotStreakFlamestrike = 0
+local VarHardCastFlamestrike = 0
+local VarSKBFlamestrike = 0
+local VarArcaneExplosion = 0
+local VarArcaneExplosionMana = 40
+local VarCombustionShiftingPower = 0
+local VarCombustionCastRemains = 1
+local VarOverpoolFireBlasts = 0
+local VarSKBDuration = 6
+local VarOnUseCutoff = 20
+local VarCombustionOnUse = false
+local VarShiftingPowerBeforeCombustion = false
+local VarItemCutoffActive = false
+local VarFireBlastPooling, VarPhoenixPooling = false, false
+local VarCombustionReadyTime, VarCombustionPrecastTime = 0, 0
+local VarTACombust = false
+local VarTimeToCombustion = 0
+local Trinket1, Trinket2
+local VarTrinket1ID, VarTrinket2ID
+local VarTrinket1CD, VarTrinket2CD
+local VarTrinket1BL, VarTrinket2BL
+local VarTrinket1Range, VarTrinket2Range
+local CombustionUp
+local CombustionDown
+local CombustionRemains
+local HeatingUp, HotStreak = false, false
+local ShiftingPowerTickReduction = 3
+local EnemiesCount8ySplash,EnemiesCount10ySplash,EnemiesCount16ySplash
+local EnemiesCount10yMelee,EnemiesCount18yMelee
+local Enemies8ySplash,Enemies10yMelee,Enemies18yMelee
+local UnitsWithIgniteCount
+local VarCombustionFlamestrike
+local BossFightRemains = 11111
+local FightRemains = 11111
+local GCDMax = 1450
+local FlamestrikeCastTime = 2500
+local PyroblastCastTime = 3000
+local BoltCastTime = 1500
+local ScorchCastTime = 1100
+local PhoenixFlamesTravelTime = 750
+local MeteorTravelTime = 1000
+local MeteorCastTime = 1500
+local skb_duration = 6000
+local FireblastCooldown = 8.2
+local ShiftingPowerCastTime = 2000
+function StateUpdate()
+
+    API.RefreshFunctionsState();
+    state.currentMana = game_api.getPower(0)
+    state.currentManaPercent = API.convertPowerToPercentage(0)
+
+    state.currentTarget = game_api.getCurrentUnitTarget()
+    state.currentPlayer = game_api.getCurrentPlayer()
+    local lowestTankTable = game_api.getPartyUnitWithRoleBelowHealthPercent(100, 40, "TANK")
+    if lowestTankTable and #lowestTankTable > 0 then
+        state.LowestTank = lowestTankTable[1]
+    else
+        state.LowestTank = state.currentPlayer
+    end
+    state.TargetCheck = state.currentTarget ~= 00 and API.isInCombatOrHasNpcId(state.currentTarget, cLists.npcIdList) and API.IsInRange(40,state.currentTarget) and game_api.isTargetHostile(true) and game_api.unitHealthPercent(state.currentTarget) > 0 
+    state.PlayerIsInCombat = game_api.unitInCombat(state.currentPlayer)
+    state.getUnits = getCombatUnits()
+
+    state.CurrentCastPercent = game_api.getCurrentPlayerCastPercentage()
+    state.lastCast = game_api.lastSpellCast()
+
+    state.IgniteUnitCount = UnitsWithAuraCount(state.getUnits, 40, auras.Ignite)
+    state.LowestDispel = API.UnitToDispel("CURSE")
+    state.afflictedUnits = game_api.getUnitsByNpcId(204773)
+    state.incorporealUnits = game_api.getUnitsByNpcId(204560)
+    --state.UnitsinCone = game_api.countUnitInCone(12, 90, true, true, false)
+    state.Bolt = game_api.hasTalent(talents.FrostfireBolt) and spells.FrostfireBolt or spells.Fireball
+
+    -- Inflight
+    state.FireBallInFlight = game_api.getMissileCount(state.Bolt)
+    state.PhoenixFlamesInFlight = game_api.getMissileCount(spells.PhoenixFlames)
+    state.MeteorInFlight = state.lastCast == spells.Meteor
+    state.PyroblastInFlight = game_api.getMissileCount(spells.Pyroblast)
+    state.PhoenixFlamesInFlightBool = state.PhoenixFlamesInFlight > 0
+    state.FireBallInFlightBool = state.FireBallInFlight > 0
+    state.PyroblastInFlightBool = state.PyroblastInFlight > 0
+
+
+    state.CurrentChannelID = game_api.unitChannelingSpellID(state.currentPlayer)
+
+    state.FireblastMaxCharges = game_api.hasTalent(205029) and 3 or 1
+    state.PhoenixFlamesMaxCharges = game_api.hasTalent(343222) and 3 or 2
+
+    state.HasDefensive = API.PlayerHasBuff(414658) or API.PlayerHasBuff(113862) or API.PlayerHasBuff(235313) 
+    state.CurrentFBChargesOnCd = game_api.getChargeCountOnCooldown(spells.Fireblast)
+    state.CurrentFBCharges = state.FireblastMaxCharges - (state.CurrentFBChargesOnCd)
+    state.CurrentPFChargesOnCd = game_api.getChargeCountOnCooldown(spells.PhoenixFlames)
+    state.CurrentPFCharges = state.PhoenixFlamesMaxCharges - (state.CurrentPFChargesOnCd)
+    state.lastCastPFCount = (game_api.lastSpellCast() == spells.PhoenixFlames) and 1 or 0
+    state.FuryOfTheSunKing = game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true)
+    state.PhoenixFlamesFractional = API.ChargesFractional(spells.PhoenixFlames,state.PhoenixFlamesMaxCharges,25)
+    state.FireblastFractional = API.ChargesFractional(spells.Fireblast,state.FireblastMaxCharges,8)
+    state.FireBlastFullRechargeTime = API.FullRechargeTime(spells.Fireblast,state.FireblastMaxCharges,8)
+    state.PhoenixFlamesFullRechargeTime = API.FullRechargeTime(spells.PhoenixFlames,state.PhoenixFlamesMaxCharges,25)
+    state.casting = game_api.currentPlayerIsCasting()
+    state.channeling = game_api.currentPlayerIsChanneling()
+    state.channelingPercent = game_api.getCurrentPlayerChannelPercentage()
+    state.castingPercent = game_api.getCurrentPlayerCastPercentage()
+    state.castingID = game_api.unitCastingSpellID(state.currentPlayer)
+    state.CombustionDown = not state.CombustionUp
+    state.FightRemains = API.timeToDieGroup()
+    state.SKBTTD = state.FightRemains
+    state.HasHotStreak = game_api.currentPlayerHasAura(auras.HotStreak,true)
+    state.currentTime = game_api.currentTime()
+    state.time = API.TimeInCombat()
+    state.HeatingUpBuff = game_api.currentPlayerHasAura(auras.HeatingUp,true)
+    state.FreeCastAvailable = FreeCastAvailable()
+    state.FreeCastAvailable2 = state.FreeCastAvailable
+    state.HotSteakInFlight = HotStreakInFlight()
+    state.useShit = useShit()
+    state.meteorDuration = game_api.hasTalentEntry(80252) and 30 or 45
+    state.isMoving = game_api.currentPlayerIsMoving()
+    local highHaste, buffCount = HasAnyTwoBuffs()
+    state.highHaste = highHaste
+    state.highHasteCount = buffCount
+    state.channelingID = game_api.unitChannelingSpellID(state.currentPlayer)
+    state.StopCastLogic =  API.SilenceLogic(state.getUnits)
+    state.HasHotStreak = (state.HeatingUpBuff  and state.castingID == spells.Scorch) and true or state.HasHotStreak
+    state.HasHotStreak = (state.HeatingUpBuff  and state.castingID == state.Bolt) and true or state.HasHotStreak
+    state.HasHotStreakIgnoreFB = game_api.currentPlayerHasAura(auras.HotStreak,true)
+    state.FreeCastAvailable = (state.HeatingUpBuff  and state.castingID == spells.Scorch) and true or state.FreeCastAvailable
+    state.FreeCastAvailable = (state.HeatingUpBuff  and state.castingID == state.Bolt) and true or state.FreeCastAvailable
+    state.GCD = game_api.getCurrentGCD()
+    state.CombustionUp = game_api.currentPlayerHasAura(auras.Combustion,true)
+    state.CombustionRemains = game_api.currentPlayerAuraRemainingTime(auras.Combustion,true)
+
+
+    ---Variables
+    VarSKBFlamestrike = 3 * (game_api.hasTalentEntry(talents.FueltheFire) and 1 or 0) + 999 * (not game_api.hasTalentEntry(talents.FueltheFire) and 1 or 0)
+    VarFirestarterCombusion = game_api.hasTalentEntry(talents.SunKingsBlessing)
+    VarHotStreakFlamestrike = game_api.hasTalentEntry(talents.FlamePatch) and 4 or 999
+    VarCombustionFlamestrike = VarHotStreakFlamestrike
+    VarKindlingReduction = (game_api.hasTalentEntry(talents.Kindling)) and 0.4 or 1
+    CombustionUp = game_api.currentPlayerHasAura(auras.Combustion,true)
+    CombustionDown = not CombustionUp
+    CombustionRemains = game_api.currentPlayerAuraRemainingTime(auras.Combustion,true)
+    EnemiesCount8ySplash = getCombatUnitsCount(8)
+    EnemiesCount10ySplash = getCombatUnitsCount(10)
+    EnemiesCount16ySplash = getCombatUnitsCount(16)
+
+end
+
+
+--- ===== Helper Functions =====
+  local function ScorchExecuteActive()
+    if not game_api.hasTalentEntry(talents.Scorch) then return false end
+    if game_api.currentPlayerHasAura(auras.HeatShimmerBuff,true) then return true end
+    return game_api.unitHealthPercent(state.currentTarget) <= 30 + 5 * API.num(game_api.hasTalentEntry(talents.SunKingsBlessing))
+  end
+  
+  local function FirestarterActive()
+    return (game_api.hasTalentEntry(talents.Firestarter) and game_api.unitHealthPercent(state.currentTarget) > 90)
+  end
+
+  local function FirestarterRemains()
+    return game_api.hasTalentEntry(talents.Firestarter) and (((game_api.unitHealthPercent(state.currentTarget) > 90) and API.TimeToX(state.currentTarget,90)*1000) or 0) or 0
+  end
+  
+
+  local function ImprovedScorchActive()
+    return game_api.hasTalentEntry(talents.ImprovedScorch) and (game_api.unitHealthPercent(state.currentTarget) < 30)
+  end
+  
+
+    local function ShiftingPowerFullReduction()
+        return 12
+    end
+  
+
+  function FreeCastAvailable()
+    local FSInFlight = FirestarterActive() and (state.PyroblastInFlight + state.FireBallInFlight) or 0
+    FSInFlight = FSInFlight + (state.PhoenixFlamesInFlight or (state.lastCastPFCount == 1))
+    return state.HasHotStreak or game_api.currentPlayerHasAura(auras.Hyperthermia,true) or (state.HeatingUpBuff  and ((ImprovedScorchActive() and state.castingID == spells.Scorch) or (FirestarterActive() and ((state.castingID == state.Bolt) or FSInFlight > 0))))
+  end
+  
+  local function UnitsWithIgnite(enemies)
+    local WithIgnite = 0
+    for _, CycleUnit in pairs(enemies) do
+      if game_api.unitHasAura(CycleUnit,auras.Ignite,true) then
+        WithIgnite = WithIgnite + 1
+      end
+    end
+    return WithIgnite
+  end
+  
+
+  function HotStreakInFlight()
+    local total = 0
+    if state.PhoenixFlamesInFlightBool or state.FireBallInFlightBool then
+        total = total + 1
+    end
+    return total
+  end
+
+
+function PlayerHasAnyAuraUp(spellIDs)
+    for _, id in ipairs(spellIDs) do
+        if game_api.currentPlayerHasAura(id, false)  then
+            return true
+        end
+    end
+    return false
+end
+
+function UnitsWithAuraCount(units, range, aura)
+    local count = 0
+
+    for _, unit in ipairs(units) do
+        -- Assuming there's a function to check if a unit is within range; if not, you'll need to implement this logic based on your API
+        if API.IsInRange(range, unit) and game_api.unitHasAura(unit, aura, true) then
+            count = count + 1
+        end
+    end
+
+    return count
+end
+
+
+function UnitWithAura(units, range, auras)
+    local lowestHealthUnit = nil
+    local lowestHealthPercent = 101 -- Start higher than 100% to ensure the first unit below 100% health is caught
+
+    for _, unit in ipairs(units) do
+        local unitHealthPercent = game_api.unitHealthPercent(unit)
+        if unitHealthPercent > 0 then
+            for _, auraID in ipairs(auras) do
+                if game_api.unitHasAura(unit, auraID, true) then
+                    if unitHealthPercent < lowestHealthPercent then
+                        lowestHealthPercent = unitHealthPercent
+                        lowestHealthUnit = unit
+                        break -- Found an aura on the unit, no need to check further auras
+                    end
+                end
+            end
+        end
+    end
+
+    return lowestHealthUnit
+end
+
+
+
+
+local AltertimeForDef = false
+local HealthAlterTime = 100
+
+function Defense()
+    local proactiveDefensiveUsed, defensiveType, debuff = API.ProactiveDefensive()
+    if proactiveDefensiveUsed and defensiveType == "debuff" then
+        if API.CanCast(spells.AlterTime) then
+            game_api.castSpell(spells.AlterTime)
+            AltertimeForDef = true
+            HealthAlterTime = game_api.unitHealthPercent(state.currentPlayer)
+            API.markDefensiveAsUsed(debuff)  
+            API.Debug("Alter Time for Proactive AoE")
+            return true
+        end
+        if API.CanCast(spells.MirrorImage) and game_api.isOnCooldown(spells.AlterTime) and (not API.PlayerHasBuff(235313) or game_api.unitHealthPercent(state.currentPlayer) <= 35) then
+            game_api.castSpell(spells.MirrorImage)
+            API.Debug("Mirror Image Casted for AoE")
+            API.markDefensiveAsUsed(debuff)  
+            return true
+        end
+        if API.CanCast(spells.GreaterInvis) then
+            game_api.castSpell(spells.GreaterInvis)
+            API.Debug("Greater Invis at HP Setting")
+            API.markDefensiveAsUsed(debuff)  
+            return true
+        end
+        -- 113862 great Invis
+        -- 414658 cold snap
+        if not API.PlayerHasBuff(auras.AlterTime) and API.CanCast(spells.IceCold) then
+            game_api.castSpell(spells.IceCold)
+            API.Debug("Ice Cold for Health")
+            API.markDefensiveAsUsed(debuff)  
+            return true
+        end
+    end
+    local proactiveDefensiveUsed, defensiveType, incomingSpellID = API.ProactiveDefensive("AOEIncoming")
+    if proactiveDefensiveUsed and defensiveType == "AOEIncoming" then
+        if API.CanCast(spells.MassBarrier) and game_api.hasTalentEntry(talents.MassBarrier) then
+            game_api.castSpell(spells.MassBarrier)
+            API.Debug("Mass Barrier for Proactive AoE")
+            API.markDefensiveAsUsed(incomingSpellID)  
+            return true
+        end
+        if API.CanCast(spells.AlterTime) and not API.PlayerHasBuff(auras.AlterTime) and not AltertimeForDef then
+            game_api.castSpell(spells.AlterTime)
+            AltertimeForDef = true
+            HealthAlterTime = game_api.unitHealthPercent(state.currentPlayer)
+            API.markDefensiveAsUsed(incomingSpellID)  
+            API.Debug("Alter Time for Proactive AoE")
+            return true
+        end
+        if API.CanCast(spells.MirrorImage) and not state.HasDefensive and game_api.isOnCooldown(spells.AlterTime) and (not API.PlayerHasBuff(235313) or game_api.unitHealthPercent(state.currentPlayer) <= 35) then
+            game_api.castSpell(spells.MirrorImage)
+            API.Debug("Mirror Image Casted for AoE")
+            API.markDefensiveAsUsed(incomingSpellID)  
+            return true
+        end
+        if API.CanCast(spells.GreaterInvis) and not state.HasDefensive then
+            game_api.castSpell(spells.GreaterInvis)
+            API.Debug("Greater Invis Proactive")
+            API.markDefensiveAsUsed(incomingSpellID)  
+            return true
+        end
+        -- 113862 great Invis
+        -- 414658 cold snap
+        if not state.HasDefensive and API.CanCast(spells.IceCold) then
+            game_api.castSpell(spells.IceCold)
+            API.Debug("Ice Cold Proactive")
+            API.markDefensiveAsUsed(incomingSpellID)  
+            return true
+        end
+    end
+
+    if not API.PlayerHasBuff(auras.AlterTime) then
+        HealthAlterTime = 100
+        AltertimeForDef = false
+    end
+    if API.PlayerHasBuff(auras.AlterTime) and AltertimeForDef and HealthAlterTime > (game_api.unitHealthPercent(state.currentPlayer) + 30) then
+        game_api.castSpell(spells.AlterTimeRecast)
+        API.Debug("Alter Time Recast after AoE")
+        HealthAlterTime = 100
+        AltertimeForDef = false
+        return true
+    end
+    if CanCast(spells.BlazingBarrier)  and not state.HasDefensive and not API.PlayerHasBuff(auras.AlterTime) and game_api.unitHealthPercent(state.currentPlayer) <= game_api.getSetting(settings.BlazingBarrier) then
+        game_api.castSpell(spells.BlazingBarrier)
+        API.Debug("Blazing Barrier at HP Setting")
+        return true
+    end
+    
+    if API.CanCast(spells.GreaterInvis) and not state.HasDefensive and game_api.unitHealthPercent(state.currentPlayer) <= game_api.getSetting(settings.GreaterInvisibility) then
+        game_api.castSpell(spells.GreaterInvis)
+        API.Debug("Greater Invis at HP Setting")
+        return true
+    end
+    -- 113862 great Invis
+    -- 414658 cold snap
+    if not API.PlayerHasBuff(auras.AlterTime) and not state.HasDefensive and API.CanCast(spells.IceCold) and game_api.unitHealthPercent(state.currentPlayer) <= game_api.getSetting(settings.iceCold) then
+        game_api.castSpell(spells.IceCold)
+        API.Debug("Ice Cold for Health")
+        return true
+    end
+end
+
+
+
+
+
+local lastSpellCastTime = {}
+
+function Affix(SpellForAfflicted, SpellForIncorporeal)
+    -- Handle Afflicted units
+    if (#state.afflictedUnits > 0) and (game_api.canCast(SpellForAfflicted) and game_api.hasTalent(talents.RemoveCurse)) then
+        for _, unit in ipairs(state.afflictedUnits) do
+            if (game_api.distanceToUnit(unit) < 40) and API.IsFacing(unit) and (game_api.unitIsCasting(unit) or game_api.unitIsChanneling(unit)) then
+                if game_api.canCast(SpellForAfflicted) then
+                    game_api.castSpellOnFocus(SpellForAfflicted, unit)
+                    return true
+                end
+            end
+        end
+    end
+
+    -- Handle Incorporeal units
+    local count = 0
+    local currentTime = game_api.currentTime()
+    if (#state.incorporealUnits > 0) and game_api.canCast(SpellForIncorporeal) and not state.moving then
+        for _, unit in ipairs(state.incorporealUnits) do
+            for _, auraId in pairs(PolymorphAuras) do
+                if game_api.unitHasAura(unit, auraId, true) then
+                    count = count + 1
+                end
+            end
+            if count < 1 and (game_api.distanceToUnit(unit) < 30) and game_api.isUnitHostile(unit, true) and
+                (game_api.unitIsCasting(unit) or game_api.unitIsChanneling(unit)) and
+                (not lastSpellCastTime[SpellForIncorporeal] or currentTime - lastSpellCastTime[SpellForIncorporeal] >= 2000) then
+                if game_api.canCast(SpellForIncorporeal) then
+                    game_api.castSpellOnFocus(SpellForIncorporeal, unit)
+                    lastSpellCastTime[SpellForIncorporeal] = currentTime
+                    print("Casting " .. SpellForIncorporeal)
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+
+function GreaterInvis()
+    if CanCast(spells.GreaterInvis) then
+        local randomNumber = API.randomBetween(20, 60)
+        for _, unit in ipairs(state.getUnits) do
+            if game_api.isUnitHostile(unit, true) then
+                if game_api.unitIsCasting(unit) and not game_api.unitIsChanneling(unit) then
+                    unitCasting = true
+                    castPercentage = game_api.unitCastPercentage(unit)
+                end
+                if game_api.unitIsChanneling(unit) then
+                    unitCasting = true
+                    castPercentage = game_api.unitChannelPercentage(unit)
+                end
+                local spellId = game_api.unitCastingSpellID(unit)
+                local channelId = game_api.unitChannelingSpellID(unit)
+                if unitCasting then
+                    if castPercentage >= randomNumber and game_api.unitTarget(unit) == game_api.getCurrentPlayer() then
+                        if cLists.shadowMeldTarget[spellId] or cLists.shadowMeldTarget[channelId] then
+                            print("Using GreaterInvis to Ignore Targeted Cast")
+                            game_api.castSpell(spells.GreaterInvis)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+
+function UnitWithHighestHealth()
+    local highestHealthUnit = nil
+    local highestEffectiveHealth = 0 -- Initialize with 0 for comparison
+    
+    for _, unit in ipairs(state.getUnits) do
+        local effectiveHealth = game_api.unitHealth(unit)
+        if effectiveHealth > highestEffectiveHealth and API.IsInRange(40, unit) then
+            highestEffectiveHealth = effectiveHealth
+            highestHealthUnit = unit
+        end
+    end
+    
+    return highestHealthUnit
+end
+
+function CanCast(spell)
+    if game_api.canCast(spell) and game_api.spellIsKnown(spell) and not game_api.isOnCooldown(spell) then
+        if (state.casting and state.castingPercent > 90) or (state.castingPercent == 100 and not state.channeling) then
+            return true
+        end
+        if (state.channeling and state.channelingPercent > 90) or (state.channelingPercent == 100 and not state.casting) then
+            return true
+        end
+        if state.channelingPercent == 0 and state.castingPercent == 0 then
+            return true
+        end
+    end
+    return false
+end
+
+
+function CanCastCharges(spell,charge)
+    if game_api.canCastCharge(spell,charge) and game_api.spellIsKnown(spell) then
+        if (state.casting and state.castingPercent > 85) or (state.castingPercent == 100 and not state.channeling) then
+            return true
+        end
+        if (state.channeling and state.channelingPercent > 90) or (state.channelingPercent == 100 and not state.casting) then
+            return true
+        end
+        if state.channelingPercent == 0 and state.castingPercent == 0 then
+            return true
+        end
+    end
+    return false
+end
+
+local lastCastTime = {}
+
+function CanCastOGCD(spell, charge)
+    local currentTime = game_api.currentTime() 
+
+    if game_api.spellIsKnown(spell) and game_api.getChargeCountOnCooldown(spell) ~= charge then
+        -- Check if the spell has been cast within the last 500ms
+        if not lastCastTime[spell] or (currentTime - lastCastTime[spell] >= 1000) then
+            return true
+        end
+    end
+    return false
+end
+
+
+
+
+
+
+
+function HasAnyTwoBuffs()
+    local buffCount = 0
+    local buffs = {390386, 80353, 2825, 32182, 264667, 381301, 390386, 10060,386540} 
+
+    for _, buff in ipairs(buffs) do
+        if game_api.currentPlayerHasAura(buff, false) then
+            buffCount = buffCount + 1
+            if buffCount >= 2 then
+                return true, buffCount
+            end
+        end
+    end
+
+    return false, buffCount
+end
+
+
+
+
+
+
+function ScorchExecuteActive()
+    if not game_api.hasTalentEntry(talents.Scorch) then return false end
+    if game_api.currentPlayerHasAura(auras.HeatShimmerBuff,true) then return true end
+    return game_api.unitHealthPercent(state.currentTarget) <= 30 + 5 * API.num(game_api.hasTalentEntry(talents.SunKingsBlessing))
+end
+
+
+function FirestarterActive()
+    return (game_api.hasTalentEntry(talents.Firestarter) and game_api.unitHealthPercent(state.currentTarget) > 90)
+end
+
+function FirestarterRemains()
+    return game_api.hasTalentEntry(talents.Firestarter) and ((game_api.unitHealthPercent(state.currentTarget) > 90) and API.TimeToX(state.currentTarget,90) or 0) or 0
+end
+
+function SearingTouchActive()
+    return game_api.hasTalentEntry(talents.Scorch) and (game_api.unitHealthPercent(state.currentTarget) < 30)
+end
+
+function ImprovedScorchActive()
+    return game_api.hasTalentEntry(talents.ImprovedScorch) and (game_api.unitHealthPercent(state.currentTarget) < 30)
+end
+
+
+
+function FreeCastAvailable()
+    local FSInFlight = FirestarterActive() and (state.PyroblastInFlight + state.FireBallInFlight) or 0
+    FSInFlight = FSInFlight + (state.PhoenixFlamesInFlight or state.lastCastPFCount)
+    return state.HasHotStreak or game_api.currentPlayerHasAura(auras.Hyperthermia,true) or (state.HeatingUpBuff  and ((ImprovedScorchActive() and state.castingID == spells.Scorch) or (FirestarterActive() and ((state.castingID == state.Bolt) or FSInFlight > 0))))
+end
+
+function HotStreakInFlight()
+    local total = 0
+    if state.PhoenixFlamesInFlightBool or state.FireBallInFlightBool then
+        total = total + 1
+    end
+    return total
+end
+
+local function ActiveTalents()
+    -- meteor,if=buff.combustion.up|(buff.sun_kings_blessing.max_stack-buff.sun_kings_blessing.stack>4|variable.time_to_combustion<=0|buff.combustion.remains>travel_time|!talent.sun_kings_blessing&(cooldown.meteor.duration<variable.time_to_combustion&fight_remains<variable.time_to_combustion))
+
+    if CanCast(spells.Meteor)   and game_api.getToggle(settings.Cooldown) and state.useShit and state.FightRemains > game_api.getSetting(settings.timeToDie) then
+        if state.CombustionUP or (CombustionUp or (VarSKBMaxStack - game_api.unitAuraStackCount(state.currentPlayer, auras.SunKingsBlessing,true) > 4 or VarTimeToCombustion <= 0 or CombustionRemains > MeteorTravelTime or not game_api.hasTalentEntry(talents.SunKingsBlessing) and (45 < VarTimeToCombustion and BossFightRemains < VarTimeToCombustion))) then
+            print("Casting Meteor - Active Talents")
+            game_api.castOptimizedAOEFromUnitList(spells.Meteor, 8,state.getUnits)
+            return true
+        end
+    end 
+    -- dragons_breath,if=talent.alexstraszas_fury&(buff.combustion.down&!buff.hot_streak.react)&(buff.feel_the_burn.up|time>15)&(!improved_scorch.active)
+
+    if CanCast(spells.DragonsBreath) and game_api.distanceToUnit(state.currentTarget) < 8 then
+        if (game_api.hasTalentEntry(talents.AlextraszasFury) and (CombustionDown and not state.HasHotStreak) and (game_api.currentPlayerHasAura(auras.FeeltheBurn,true) or state.time > 15000) and not ImprovedScorchActive()) then
+            print("Casting Dragon's Breath - Active Talents")
+            game_api.castSpell(spells.DragonsBreath)
+            return true
+        end
+    end
+  end
+
+
+
+
+function CombustionCooldowns()
+
+    if state.FightRemains >= game_api.getSetting(settings.timeToDie) and game_api.currentPlayerAuraRemainingTime(auras.Combustion,true) > 6000 then
+        local trinket1 = game_api.getTrinketID1()
+        if trinket1 ~= nil then
+            if (trinket1 == 193773) then
+                if not game_api.isOnCooldown(trinket1) and (game_api.unitAuraRemainingTime(state.currentPlayer, 381955, true) > 0 or game_api.unitAuraRemainingTime(state.currentPlayer, 381957, true) > 0) and game_api.canCastObject(trinket1) and state.FightRemains > 10  then
+                    print("Using Trinket 1")
+                    game_api.castObject(trinket1)
+                    return true
+                end
+            end
+        end --381957 verse
+        --381955 haste
+        local trinket2 = game_api.getTrinketID2()
+        if trinket2 ~= nil then
+            if (trinket2 == 193773) then --spoils logic
+                if not game_api.isOnCooldown(trinket2) and (game_api.unitAuraRemainingTime(state.currentPlayer, 381955, true) > 0 or game_api.unitAuraRemainingTime(state.currentPlayer, 381957, true) > 0) and game_api.canCastObject(trinket2) and state.FightRemains > 10  then
+                    print("Using Trinket 2")
+                    game_api.castObject(trinket2)
+                    return true
+                end
+            end
+        end
+        if API.dpsTrinket(auras.Combustion,false) then
+            return true
+        end
+    end
+    if API.useRacialCommon() then
+        return true
+    end 
+    return false
+
+end
+
+function ExecuteRemains(spell)
+    if game_api.currentPlayerIsCasting() then
+        if game_api.unitCastingSpellID(state.currentPlayer) == spell then
+            return 100 - game_api.getCurrentPlayerCastPercentage()
+        end
+    end
+    return 99999
+end
+
+
+local function CombustionPhase()
+    -- call_action_list,name=combustion_cooldowns,if=buff.combustion.remains>variable.skb_duration|fight_remains<20
+    if CombustionRemains > VarSKBDuration then
+      local ShouldReturn = CombustionCooldowns(); if ShouldReturn then return ShouldReturn; end
+    end
+    -- call_action_list,name=active_talents
+    local ShouldReturn = ActiveTalents(); if ShouldReturn then return ShouldReturn; end
+    -- variable declaration from below
+    -- variable,name=TA_combust,value=cooldown.combustion.remains<10&buff.combustion.up
+    VarTACombust = game_api.getCooldownRemainingTime(spells.Combustion) < 10000 and CombustionUp
+    -- combustion from below
+
+    if CanCast(spells.Combustion) and game_api.getToggle(settings.Cooldown) and state.FightRemains > game_api.getSetting(settings.timeToDie) then
+        if HotStreakInFlight() == 0 and CombustionDown and VarTimeToCombustion <= 0 and (state.castingID == spells.Scorch and ExecuteRemains(spells.Scorch) < 50 or state.castingID == state.Bolt and ExecuteRemains(state.Bolt) < 50 or state.castingID == spells.Pyroblast and ExecuteRemains(spells.Pyroblast) < 50 or state.castingID == spells.Flamestrike and ExecuteRemains(spells.Flamestrike) < 50) then
+            print("Casting Combustion - Combustion Phase")
+            game_api.castSpell(spells.Combustion)
+            return true
+        end
+    end
+    -- fire_blast lines from below
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=(!variable.TA_combust|talent.sun_kings_blessing)&!variable.fire_blast_pooling&(!improved_scorch.active|action.scorch.executing|debuff.improved_scorch.remains>4*gcd.max)&(buff.fury_of_the_sun_king.down|action.pyroblast.executing)&buff.combustion.up&!buff.hot_streak.react&hot_streak_spells_in_flight+buff.heating_up.react*(gcd.remains>0)<2
+
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not FreeCastAvailable() and ((not VarTACombust or game_api.hasTalentEntry(talents.SunKingsBlessing)) and not VarFireBlastPooling and (not ImprovedScorchActive() or state.castingID == spells.Scorch or game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) > 4 * GCDMax) and (game_api.currentPlayerHasAura(auras.FuryoftheSunKing,false) or state.castingID == spells.Pyroblast) and CombustionUp and not state.HasHotStreak and HotStreakInFlight() + API.num(state.HeatingUpBuff) * API.num(game_api.getCurrentGCD() > 0) < 2) then
+            print("Casting Fireblast - Combustion Phase")
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            game_api.castSpell(spells.Fireblast)
+            return true
+        end
+    end
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=variable.TA_combust&!variable.fire_blast_pooling&charges_fractional>2.5&(!improved_scorch.active|action.scorch.executing|debuff.improved_scorch.remains>4*gcd.max)&(buff.fury_of_the_sun_king.down|action.pyroblast.executing)&buff.combustion.up&!buff.hot_streak.react&hot_streak_spells_in_flight+buff.heating_up.react*(gcd.remains>0)<2
+
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not FreeCastAvailable() and (VarTACombust and not VarFireBlastPooling and state.FireblastFractional > 2.5 and (not ImprovedScorchActive() or state.castingID == spells.Scorch or game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) > 4 * GCDMax) and (not game_api.currentPlayerHasAura(auras.FuryoftheSunKing,false) or state.castingID == spells.Pyroblast) and CombustionUp and not state.HasHotStreak and HotStreakInFlight() + API.num(state.HeatingUpBuff) * API.num(game_api.getCurrentGCD() > 0) < 2) then
+            print("Casting Fireblast - Combustion Phase")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+    end
+    -- flamestrike,if=buff.combustion.down&buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.remains>cast_time&buff.fury_of_the_sun_king.expiration_delay_remains=0&cooldown.combustion.remains<cast_time&active_enemies>=variable.skb_flamestrike
+    -- TODO: Handle expiration_delay_remains
+
+    if CanCast(spells.Flamestrike) and state.castingID ~= spells.Flamestrike then
+        if (CombustionDown and game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and game_api.unitAuraRemainingTime(state.currentPlayer, auras.FuryoftheSunKing,true) > FlamestrikeCastTime and game_api.getCooldownRemainingTime(spells.Combustion) < FlamestrikeCastTime and EnemiesCount8ySplash >= VarSKBFlamestrike) then
+            print("Casting Flamestrike - Combustion Phase")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- pyroblast,if=buff.combustion.down&buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.remains>cast_time&(buff.fury_of_the_sun_king.expiration_delay_remains=0|buff.flame_accelerant.up)
+    -- TODO: Handle expiration_delay_remains
+    -- Note: Not using PBCast to force non-free Pyro to main icon.
+
+    if CanCast(spells.Pyroblast) and state.castingID ~= spells.Pyroblast then
+        if (CombustionDown and game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and game_api.unitAuraRemainingTime(state.currentPlayer, auras.FuryoftheSunKing,true) > PyroblastCastTime and (game_api.currentPlayerHasAura(auras.FlameAccelerantBuff,true))) then
+            print("Casting Pyroblast - Combustion Phase")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- meteor,if=talent.isothermic_core&buff.combustion.down&cooldown.combustion.remains<cast_time
+    if CanCast(spells.Meteor) and game_api.getToggle(settings.Cooldown) and state.FightRemains > game_api.getSetting(settings.timeToDie) then
+        if game_api.hasTalentEntry(talents.IsothermicCore) and CombustionDown and game_api.getCooldownRemainingTime(spells.Combustion) < MeteorCastTime then
+            print("Casting Meteor - Combustion Phase")
+            game_api.castOptimizedAOEFromUnitList(spells.Meteor, 8,state.getUnits)
+            return true
+        end
+    end
+    -- fireball,if=buff.combustion.down&cooldown.combustion.remains<cast_time&active_enemies<2&!improved_scorch.active&!(talent.sun_kings_blessing&talent.flame_accelerant)
+
+    if CanCast(state.Bolt)  then
+        if CombustionDown and CombustionRemains < BoltCastTime and EnemiesCount16ySplash < 2 and not ImprovedScorchActive() and not (game_api.hasTalentEntry(talents.SunKingsBlessing) and game_api.hasTalentEntry(talents.FlameAccelerant)) then
+            print("Casting Fireball - Combustion Phase")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+    -- scorch,if=buff.combustion.down&cooldown.combustion.remains<cast_time
+
+    if CanCast(spells.Scorch) then
+        if CombustionDown and game_api.getCooldownRemainingTime(spells.Combustion) < ScorchCastTime then
+            print("Casting Scorch - Combustion Phase")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- combustion,use_off_gcd=1,use_while_casting=1,if=hot_streak_spells_in_flight=0&buff.combustion.down&variable.time_to_combustion<=0&(action.scorch.executing&action.scorch.execute_remains<variable.combustion_cast_remains|action.fireball.executing&action.fireball.execute_remains<variable.combustion_cast_remains|action.pyroblast.executing&action.pyroblast.execute_remains<variable.combustion_cast_remains|action.flamestrike.executing&action.flamestrike.execute_remains<variable.combustion_cast_remains|action.meteor.in_flight&action.meteor.in_flight_remains<variable.combustion_cast_remains)
+    -- Note: Moved above the previous five lines, due to use_while_casting.
+    -- variable,name=TA_combust,value=cooldown.combustion.remains<10&buff.combustion.up
+    -- Note: Moved to the top of the function, since below fire_blast lines had to be moved up.
+    VarTACombust = game_api.getCooldownRemainingTime(spells.Combustion) < 10000 and CombustionUp
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=(!variable.TA_combust|talent.sun_kings_blessing)&!variable.fire_blast_pooling&(!improved_scorch.active|action.scorch.executing|debuff.improved_scorch.remains>4*gcd.max)&(buff.fury_of_the_sun_king.down|action.pyroblast.executing)&buff.combustion.up&!buff.hot_streak.react&hot_streak_spells_in_flight+buff.heating_up.react*(gcd.remains>0)<2
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=variable.TA_combust&!variable.fire_blast_pooling&charges_fractional>2.5&(!improved_scorch.active|action.scorch.executing|debuff.improved_scorch.remains>4*gcd.max)&(buff.fury_of_the_sun_king.down|action.pyroblast.executing)&buff.combustion.up&!buff.hot_streak.react&hot_streak_spells_in_flight+buff.heating_up.react*(gcd.remains>0)<2
+    -- Note: Moved above with combustion, due to use_while_casting
+    -- cancel_buff,name=hyperthermia,if=buff.fury_of_the_sun_king.react
+    -- flamestrike,if=(buff.hot_streak.react&active_enemies>=variable.combustion_flamestrike)|(buff.hyperthermia.react&active_enemies>=variable.combustion_flamestrike-talent.hyperthermia)
+
+    if CanCast(spells.Flamestrike) then
+        if (state.HasHotStreak and EnemiesCount8ySplash >= VarCombustionFlamestrike) or (game_api.currentPlayerHasAura(auras.Hyperthermia,true) and EnemiesCount8ySplash >= VarCombustionFlamestrike - API.num(game_api.hasTalentEntry(talents.Hyperthermia))) then
+            print("Casting Flamestrike - Combustion Phase")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- pyroblast,if=buff.hyperthermia.react
+
+    if CanCast(spells.Pyroblast) then
+        if game_api.currentPlayerHasAura(auras.Hyperthermia,true) then
+            print("Casting Pyroblast - Combustion Phase")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- pyroblast,if=buff.hot_streak.react&buff.combustion.up
+
+    if CanCast(spells.Pyroblast) then
+        if state.HasHotStreak and CombustionUp then
+            print("Casting Pyroblast - Combustion Phase")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- pyroblast,if=prev_gcd.1.scorch&buff.heating_up.react&active_enemies<variable.combustion_flamestrike&buff.combustion.up
+
+    if CanCast(spells.Pyroblast) then
+        if state.lastCast == spells.Scorch and state.HeatingUpBuff and EnemiesCount8ySplash < VarCombustionFlamestrike and CombustionUp then
+            print("Casting Pyroblast - Combustion Phase")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- flamestrike,if=buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.remains>cast_time&active_enemies>=variable.skb_flamestrike&buff.fury_of_the_sun_king.expiration_delay_remains=0
+
+    if CanCast(spells.Flamestrike) and state.castingID ~= spells.Flamestrike then
+        if game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and game_api.currentPlayerAuraRemainingTime(auras.FuryoftheSunKing,true) > FlamestrikeCastTime and EnemiesCount8ySplash >= VarSKBFlamestrike then
+            print("Casting Flamestrike - Combustion Phase")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- pyroblast,if=buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.remains>cast_time&buff.fury_of_the_sun_king.expiration_delay_remains=0
+    -- Note: Not using PBCast to force non-free Pyro to main icon.
+
+    if CanCast(spells.Pyroblast) and state.castingID ~= spells.Pyroblast then
+        if game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and game_api.currentPlayerAuraRemainingTime(auras.FuryoftheSunKing,true) > PyroblastCastTime then
+            print("Casting Pyroblast - Combustion Phase")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+
+    if CanCastOGCD(spells.PhoenixFlames,state.PhoenixFlamesMaxCharges) then
+        if game_api.hasTalentEntry(talents.PhoenixReborn) and API.num(state.HeatingUpBuff) + HotStreakInFlight() < 2 and game_api.currentPlayerHasAura(auras.FlamesFuryBuff,true) then
+            print("Casting Phoenix Flames - Combustion Phase 1")
+            game_api.castSpell(spells.PhoenixFlames)
+            return true
+        end
+    end
+    -- fireball,if=buff.frostfire_empowerment.up&!buff.hot_streak.react&!buff.excess_frost.up
+
+    if CanCast(state.Bolt) then
+        if game_api.currentPlayerHasAura(auras.FrostfireEmpowermentBuff,true) and not state.HasHotStreak and not game_api.currentPlayerHasAura(auras.ExcessFrostBuff,true) then
+            print("Casting Fireball - Combustion Phase")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+    -- scorch,if=improved_scorch.active&(debuff.improved_scorch.remains<4*gcd.max)&active_enemies<variable.combustion_flamestrike
+
+    if CanCast(spells.Scorch) then
+        if ImprovedScorchActive() and game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) < 4 * GCDMax and EnemiesCount16ySplash < VarCombustionFlamestrike then
+            print("Casting Scorch - Combustion Phase")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- scorch,if=buff.heat_shimmer.react&(talent.scald|talent.improved_scorch)&active_enemies<variable.combustion_flamestrike
+
+    if CanCast(spells.Scorch) then
+        if game_api.currentPlayerHasAura(auras.HeatShimmerBuff,true) and (game_api.hasTalentEntry(talents.Scald) or game_api.hasTalentEntry(talents.ImprovedScorch)) and EnemiesCount16ySplash < VarCombustionFlamestrike then
+            print("Casting Scorch - Combustion Phase")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- phoenix_flames,if=(!talent.call_of_the_sun_king&travel_time<buff.combustion.remains|(talent.call_of_the_sun_king&buff.combustion.remains<4|buff.sun_kings_blessing.stack<8))&buff.heating_up.react+hot_streak_spells_in_flight<2
+
+    if CanCastOGCD(spells.PhoenixFlames,state.PhoenixFlamesMaxCharges) then
+        if (not game_api.hasTalentEntry(talents.CalloftheSunKing) and 750 < CombustionRemains or (game_api.hasTalentEntry(talents.CalloftheSunKing) and CombustionRemains < 4000 or game_api.unitAuraStackCount(state.currentPlayer,auras.SunKingsBlessing,true) < 8) and API.num(state.HeatingUpBuff) + HotStreakInFlight() < 2) then
+            print("Casting Phoenix Flames - Combustion Phase 2")
+            game_api.castSpell(spells.PhoenixFlames)
+            return true
+        end
+    end
+    -- fireball,if=buff.frostfire_empowerment.up&!buff.hot_streak.react
+
+    if CanCast(state.Bolt) then
+        if game_api.currentPlayerHasAura(auras.FrostfireEmpowermentBuff,true) and not state.HasHotStreak then
+            print("Casting Fireball - Combustion Phase")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+    -- scorch,if=buff.combustion.remains>cast_time&cast_time>=gcd.max
+    -- Note: Using Player:GCD() here to avoid this line being skipped from the extra 0.25s added to GCDMax.
+
+    if CanCast(spells.Scorch) then
+        if CombustionRemains > ScorchCastTime and ScorchCastTime >= GCDMax then
+            print("Casting Scorch - Combustion Phase")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- fireball,if=buff.combustion.remains>cast_time
+
+    if CanCast(state.Bolt) then
+        if CombustionRemains > BoltCastTime then
+            print("Casting Fireball - Combustion Phase")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+end
+
+
+local function CombustionTiming()
+    -- variable,use_off_gcd=1,use_while_casting=1,name=combustion_ready_time,value=cooldown.combustion.remains*expected_kindling_reduction
+    VarCombustionReadyTime = game_api.getCooldownRemainingTime(spells.Combustion) * VarKindlingReduction
+    -- variable,use_off_gcd=1,use_while_casting=1,name=combustion_precast_time,value=action.fireball.cast_time*(active_enemies<variable.combustion_flamestrike)+action.flamestrike.cast_time*(active_enemies>=variable.combustion_flamestrike)-variable.combustion_cast_remains
+    VarCombustionPrecastTime = BoltCastTime * API.num(EnemiesCount8ySplash < VarCombustionFlamestrike) + FlamestrikeCastTime * API.num(EnemiesCount8ySplash >= VarCombustionFlamestrike) - VarCombustionCastRemains
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,value=variable.combustion_ready_time
+    VarTimeToCombustion = VarCombustionReadyTime
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,op=max,value=firestarter.remains,if=talent.firestarter&!variable.firestarter_combustion
+    if game_api.hasTalentEntry(talents.Firestarter) and not VarFirestarterCombusion then
+        VarTimeToCombustion = math.max(FirestarterRemains(), VarTimeToCombustion)
+    end
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,op=max,value=(buff.sun_kings_blessing.max_stack-buff.sun_kings_blessing.stack)*(3*gcd.max),if=talent.sun_kings_blessing&firestarter.active&buff.fury_of_the_sun_king.down
+
+    if game_api.hasTalentEntry(talents.SunKingsBlessing) and FirestarterActive() and not state.FuryOfTheSunKing then
+        VarTimeToCombustion = math.max(((VarSKBMaxStack - game_api.unitAuraStackCount(state.currentPlayer,auras.SunKingsBlessing,true)) * (3 * GCDMax)),VarTimeToCombustion )
+    end
+
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,op=max,value=buff.combustion.remains
+    VarTimeToCombustion = math.max(CombustionRemains, VarTimeToCombustion)
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,op=max,value=raid_event.adds.in,if=raid_event.adds.exists&raid_event.adds.count>=3&raid_event.adds.duration>15
+    -- Note: Skipping this, as we don't handle SimC's raid_event
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,value=raid_event.vulnerable.in*!raid_event.vulnerable.up,if=raid_event.vulnerable.exists&variable.combustion_ready_time<raid_event.vulnerable.in
+    -- Note: Skipping this, as we don't handle SimC's raid_event
+    -- variable,use_off_gcd=1,use_while_casting=1,name=time_to_combustion,value=variable.combustion_ready_time,if=variable.combustion_ready_time+cooldown.combustion.duration*(1-(0.4+0.2*talent.firestarter)*talent.kindling)<=variable.time_to_combustion|variable.time_to_combustion>fight_remains-20
+
+    if (VarCombustionReadyTime/1000) + 120 * (1-(0.4 + 0.2 * (game_api.hasTalentEntry(talents.Firestarter) and 1 or 0)) * (game_api.hasTalentEntry(talents.Kindling) and 1 or 0)) <= VarTimeToCombustion then
+        VarTimeToCombustion = VarCombustionReadyTime
+    end
+  end
+
+
+
+
+
+
+local function FirestarterFireBlasts()
+    -- fire_blast,use_while_casting=1,if=!variable.fire_blast_pooling&!buff.hot_streak.react&(action.fireball.execute_remains>gcd.remains|action.pyroblast.executing)&buff.heating_up.react+hot_streak_spells_in_flight=1&(cooldown.shifting_power.ready|charges>1|buff.feel_the_burn.remains<2*gcd.max)
+
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (not VarFireBlastPooling and not state.HasHotStreak and API.num(state.HeatingUpBuff) + HotStreakInFlight() == 1 and (not game_api.isOnCooldown(spells.ShiftingPower) or game_api.getChargeCountOnCooldown(spells.Fireblast) < state.FireblastMaxCharges or game_api.currentPlayerAuraRemainingTime(auras.FeeltheBurn,true) < 2 * GCDMax)) then
+            print("Fire Blast - Firestarter Fire Blast")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+    end
+    -- fire_blast,use_off_gcd=1,if=!variable.fire_blast_pooling&buff.heating_up.react+hot_streak_spells_in_flight=1&(talent.feel_the_burn&buff.feel_the_burn.remains<gcd.remains|cooldown.shifting_power.ready)&time>0
+    -- Note: Skipping time>0, as we can't ever hit time at 0.
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (not VarFireBlastPooling and API.num(state.HeatingUpBuff) + HotStreakInFlight() == 1 and (game_api.hasTalentEntry(talents.FeelTheBurn) and game_api.currentPlayerAuraRemainingTime(auras.FeeltheBurn,true) < game_api.getCurrentGCD() or not game_api.isOnCooldown(spells.ShiftingPower))) then
+            print("Fire Blast - Firestarter Fire Blast")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+    end
+  end
+
+
+
+
+local function StandardRotation()
+    -- flamestrike,if=active_enemies>=variable.hot_streak_flamestrike&(buff.hot_streak.react|buff.hyperthermia.react)
+
+    if CanCast(spells.Flamestrike) then
+        if EnemiesCount8ySplash >= VarHotStreakFlamestrike and (state.HasHotStreak or game_api.currentPlayerHasAura(auras.Hyperthermia,true)) then
+            print("Casting Flamestrike - Standard Rotation")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- fireball,if=buff.hot_streak.up&buff.hyperthermia.down&!cooldown.shifting_power.ready&cooldown.phoenix_flames.charges<1&!scorch_execute.active&!prev_gcd.1.fireball,line_cd=2*gcd.max
+
+    if CanCast(state.Bolt) then
+        if state.HasHotStreak and not game_api.currentPlayerHasAura(auras.Hyperthermia,true) and game_api.isOnCooldown(spells.ShiftingPower) and game_api.getChargeCountOnCooldown(spells.PhoenixFlames) < state.PhoenixFlamesMaxCharges and not ScorchExecuteActive() and not state.lastCast == state.Bolt then
+            print("Casting Fireball - Standard Rotation")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+    -- pyroblast,if=(buff.hyperthermia.react|buff.hot_streak.react&(buff.hot_streak.remains<action.fireball.execute_time)|buff.hot_streak.react&(hot_streak_spells_in_flight|firestarter.active|talent.call_of_the_sun_king&action.phoenix_flames.charges)|buff.hot_streak.react&scorch_execute.active)
+    -- Note: Simplifying this line, as there were instances where instant Pyroblast wasn't being suggested.
+
+    if CanCast(spells.Pyroblast) and FreeCastAvailable() then
+        print("Casting Pyroblast - Standard Rotation")
+        game_api.castSpell(spells.Pyroblast)
+        return true
+    end
+    --if S.Pyroblast:IsReady() and (Player:BuffUp(S.Hyperthermia) or HotStreak and (Player:BuffRemains(S.HotStreakBuff) < Bolt:ExecuteRemains()) or HotStreak and (HotStreakInFlight() > 0 or FirestarterActive() or S.CalloftheSunKing:IsAvailable() and S.PhoenixFlames:Charges() > 0) or HotStreak and ScorchExecuteActive()) then
+      --if PBCast(S.Pyroblast, nil, nil, not Target:IsSpellInRange(S.Pyroblast)) then return "pyroblast standard_rotation 4"; end
+    --end
+    -- Note: fire_blast lines moved from below.
+    -- Note: Removed Hyperthermia timings, as it caused Fire Blast to only quickly appear in the last 0.5s of a Fireball/Pyroblast cast.
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=!firestarter.active&(!variable.fire_blast_pooling|talent.spontaneous_combustion)&buff.fury_of_the_sun_king.down&(((action.fireball.executing&(action.fireball.execute_remains<0.5|!talent.hyperthermia)|action.pyroblast.executing&(action.pyroblast.execute_remains<0.5))&buff.heating_up.react)|(scorch_execute.active&(!improved_scorch.active|debuff.improved_scorch.stack=debuff.improved_scorch.max_stack|full_recharge_time<3)&(buff.heating_up.react&!action.scorch.executing|!buff.hot_streak.react&!buff.heating_up.react&action.scorch.executing&!hot_streak_spells_in_flight)))
+
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (not FirestarterActive() and (not VarFireBlastPooling or game_api.hasTalentEntry(talents.SpontaneousCombustion)) and not game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and ((state.castingID == state.Bolt or state.castingID == spells.Pyroblast) and state.HeatingUpBuff) or (ScorchExecuteActive() and (not ImprovedScorchActive() or game_api.unitAuraStackCount(state.currentTarget,auras.ImprovedScorch,true) == VarImprovedScorchMaxStack or state.FireblastFullRechargeTime < 3) and (state.HeatingUpBuff and state.castingID ~= spells.Scorch or not state.HasHotStreak and not state.HeatingUpBuff and state.castingID == spells.Scorch and state.HotStreakInFlight == 0))) then
+            print("Fire Blast - Standard Rotation")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+    end
+    -- Note: Other fire_blast moved from below.
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=!firestarter.active&(!variable.fire_blast_pooling|talent.spontaneous_combustion)&buff.fury_of_the_sun_king.down&(buff.heating_up.up&hot_streak_spells_in_flight<1&(prev_gcd.1.phoenix_flames|prev_gcd.1.scorch))|(((buff.bloodlust.up&charges_fractional>1.5)|charges_fractional>2.5|buff.feel_the_burn.remains<0.5|full_recharge_time*1-(0.5*cooldown.shifting_power.ready)<buff.hyperthermia.duration)&buff.heating_up.react)
+
+    if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (not FirestarterActive() and (not VarFireBlastPooling or game_api.hasTalentEntry(talents.SpontaneousCombustion)) and not game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and (state.HeatingUpBuff and state.HotStreakInFlight < 1 and (state.lastCast == spells.PhoenixFlames or state.lastCast == spells.Scorch)) or (((API.HasLust() and state.FireblastFractional > 1.5) or state.FireblastFractional > 2.5 or game_api.currentPlayerAuraRemainingTime(auras.FeeltheBurn,true) < 500 or state.FireblastFullRechargeTime * 1 - (0.5 * API.num(game_api.isOnCooldown(spells.ShiftingPower))) < 6) and state.HeatingUpBuff)) then
+            print("Fire Blast - Standard Rotation")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+    end
+    -- flamestrike,if=active_enemies>=variable.skb_flamestrike&buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.expiration_delay_remains=0
+
+    if CanCast(spells.Flamestrike) and state.castingID ~= spells.Flamestrike then
+        if EnemiesCount8ySplash >= VarSKBFlamestrike and game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) then
+            print("Casting Flamestrike - Standard Rotation")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- scorch,if=improved_scorch.active&debuff.improved_scorch.remains<action.pyroblast.cast_time+5*gcd.max&buff.fury_of_the_sun_king.up&!action.scorch.in_flight
+    -- Note: Using IsCasting check for !action.scorch.in_flight, since Scorch is an instant hit ability with no travel time.
+
+    if CanCast(spells.Scorch) then
+        if ImprovedScorchActive() and game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) < PyroblastCastTime + 5 * GCDMax and game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) and not state.castingID == spells.Scorch then
+            print("Casting Scorch - Standard Rotation")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- pyroblast,if=buff.fury_of_the_sun_king.up&buff.fury_of_the_sun_king.expiration_delay_remains=0
+    -- Note: Not using PBCast to force non-free Pyro to main icon.
+
+    if CanCast(spells.Pyroblast) and state.castingID ~= spells.Pyroblast then
+        if game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true) then
+            print("Casting Pyroblast - Standard Rotation")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=!firestarter.active&(!variable.fire_blast_pooling|talent.spontaneous_combustion)&buff.fury_of_the_sun_king.down&(((action.fireball.executing&(action.fireball.execute_remains<0.5|!talent.hyperthermia)|action.pyroblast.executing&(action.pyroblast.execute_remains<0.5))&buff.heating_up.react)|(scorch_execute.active&(!improved_scorch.active|debuff.improved_scorch.stack=debuff.improved_scorch.max_stack|full_recharge_time<3)&(buff.heating_up.react&!action.scorch.executing|!buff.hot_streak.react&!buff.heating_up.react&action.scorch.executing&!hot_streak_spells_in_flight)))
+    -- fire_blast,use_off_gcd=1,use_while_casting=1,if=!firestarter.active&(!variable.fire_blast_pooling|talent.spontaneous_combustion)&buff.fury_of_the_sun_king.down&(buff.heating_up.up&hot_streak_spells_in_flight<1&(prev_gcd.1.phoenix_flames|prev_gcd.1.scorch))|(((buff.bloodlust.up&charges_fractional>1.5)|charges_fractional>2.5|buff.feel_the_burn.remains<0.5|full_recharge_time*1-(0.5*cooldown.shifting_power.ready)<buff.hyperthermia.duration)&buff.heating_up.react)
+    -- Note: Moved both fire_blast uses above previous 3 lines, due to use_while_casting.
+    -- pyroblast,if=prev_gcd.1.scorch&buff.heating_up.react&scorch_execute.active&active_enemies<variable.hot_streak_flamestrike
+
+    if CanCast(spells.Pyroblast) then
+        if state.lastCast == spells.Scorch and state.HeatingUpBuff and ScorchExecuteActive() and EnemiesCount16ySplash < VarHotStreakFlamestrike then
+            print("Casting Pyroblast - Standard Rotation")
+            game_api.castSpell(spells.Pyroblast)
+            return true
+        end
+    end
+    -- scorch,if=improved_scorch.active&debuff.improved_scorch.remains<gcd.max
+
+    if CanCast(spells.Scorch) then
+        if ImprovedScorchActive() and game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) < GCDMax then
+            print("Casting Scorch - Standard Rotation")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+
+    if CanCast(state.Bolt) then
+        if game_api.currentPlayerHasAura(auras.FrostfireEmpowermentBuff,true) and not state.HasHotStreak and not game_api.currentPlayerHasAura(auras.ExcessFrostBuff,true) then
+            print("Casting Fireball - Standard Rotation")
+            game_api.castSpell(state.Bolt)
+            return true
+        end
+    end
+    -- scorch,if=buff.heat_shimmer.react&(talent.scald|talent.improved_scorch)&active_enemies<variable.combustion_flamestrike
+
+    if CanCast(spells.Scorch) then
+        if game_api.currentPlayerHasAura(auras.HeatShimmerBuff,true) and (game_api.hasTalentEntry(talents.Scald) or game_api.hasTalentEntry(talents.ImprovedScorch)) and EnemiesCount10ySplash < VarCombustionFlamestrike then
+            print("Casting Scorch - Standard Rotation")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- phoenix_flames,if=!buff.hot_streak.up&(hot_streak_spells_in_flight<1&(!prev_gcd.1.fireball|(buff.heating_up.down&buff.hot_streak.down)))|(hot_streak_spells_in_flight<2&buff.flames_fury.react)
+
+    if CanCastOGCD(spells.PhoenixFlames,state.PhoenixFlamesMaxCharges) then
+        if not state.HasHotStreak and (state.HotSteakInFlight < 1 and (not state.lastCast == state.Bolt or (not state.HeatingUpBuff and not state.HasHotStreak)) or (state.HotSteakInFlight < 2 and game_api.currentPlayerHasAura(auras.FlamesFuryBuff,true))) then
+            print("Casting Phoenix Flames - Standard Rotation")
+            game_api.castSpell(spells.PhoenixFlames)
+            return true
+        end
+    end
+    -- call_action_list,name=active_talents
+    local ShouldReturn = ActiveTalents(); if ShouldReturn then return ShouldReturn; end
+    -- dragons_breath,if=active_enemies>1&talent.alexstraszas_fury
+
+    if CanCast(spells.DragonsBreath) then
+        if state.EnemiesCount16ySplash > 1 and game_api.hasTalentEntry(talents.AlextraszasFury) then
+            print("Casting Dragons Breath - Standard Rotation")
+            game_api.castSpell(spells.DragonsBreath)
+            return true
+        end
+    end
+    -- scorch,if=(scorch_execute.active|buff.heat_shimmer.react)
+
+    if CanCast(spells.Scorch) then
+        if ScorchExecuteActive() or game_api.currentPlayerHasAura(auras.HeatShimmerBuff,true) then
+            print("Casting Scorch - Standard Rotation")
+            game_api.castSpell(spells.Scorch)
+            return true
+        end
+    end
+    -- arcane_explosion,if=active_enemies>=variable.arcane_explosion&mana.pct>=variable.arcane_explosion_mana
+
+    -- flamestrike,if=active_enemies>=variable.hard_cast_flamestrike
+
+    if CanCast(spells.Flamestrike) then
+        if EnemiesCount8ySplash >= VarHardCastFlamestrike then
+            print("Casting Flamestrike - Standard Rotation")
+            game_api.castOptimizedAOEFromUnitList(spells.Flamestrike, 8,state.getUnits)
+            return true
+        end
+    end
+    -- fireball
+
+    if CanCast(state.Bolt) then
+        print("Casting Fireball - Standard Rotation")
+        game_api.castSpell(state.Bolt)
+        return true
+    end
+  end
+  
+
+
+
+
+local startTimeCrash = nil
+function useShit()
+    local tanks = game_api.getPartyUnitsByRole("TANK")
+    if #tanks > 0 then
+        local delaySettingTank = 300
+        for _, tank in ipairs(tanks) do
+            local totalCombatUnits = #state.getUnits
+            local enemiesWithin10Yards = 0
+            for _, unit in ipairs(state.getUnits) do
+                if game_api.distanceBetweenUnits(tank, unit) <= 8 then 
+                    enemiesWithin10Yards = enemiesWithin10Yards + 1
+                end
+                local percentageWithin10Yards = (enemiesWithin10Yards / totalCombatUnits) * 100
+                if ((percentageWithin10Yards >= 75) ) and game_api.distanceBetweenUnits(tank, unit) < 5  then
+                    if game_api.unitIsMoving(tank) then
+                        startTimeCrash = state.currentTime
+                    elseif startTimeCrash then
+                        if state.currentTime - startTimeCrash >= delaySettingTank then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+    elseif #tanks == 0 then
+        return true 
+    end
+    return false
+end
+
+
+
+function DPS()
+
+    if game_api.getSetting(settings.TemporalWarp) and hasBloodlustExhaustion() and state.highHasteCount > 0 then
+        if game_api.canCast(spells.TimeWarp) then
+            game_api.castSpell(spells.TimeWarp)
+            return true
+        end
+    end
+
+    if (state.castingID == spells.Pyroblast or state.castingID == spells.Flamestrike) and (not state.FuryOfTheSunKing or not game_api.getToggle(settings.SKB)) then
+        game_api.stopCast()
+    end
+
+    if (game_api.getToggle(settings.Cooldown) or state.CombustionUp) and state.FightRemains >= game_api.getSetting(settings.timeToDie) then
+        CombustionTiming()
+    end
+    VarShiftingPowerBeforeCombustion = VarTimeToCombustion > game_api.getCooldownRemainingTime(spells.ShiftingPower)
+    VarFireBlastPooling = CombustionDown and state.FireblastFractional + (VarTimeToCombustion + ShiftingPowerFullReduction() * API.num(VarShiftingPowerBeforeCombustion)) / FireblastCooldown - 1 < state.FireblastMaxCharges + VarOverpoolFireBlasts / FireblastCooldown - (12 / FireblastCooldown) % 1 and VarTimeToCombustion < state.FightRemains
+    
+
+    if VarTimeToCombustion <= 0 or CombustionUp or VarTimeToCombustion < VarCombustionPrecastTime and game_api.getCooldownRemainingTime(spells.combustion) < VarCombustionPrecastTime then
+        local ShouldReturn = CombustionPhase(); if ShouldReturn then return ShouldReturn; end
+      end
+      -- variable,use_off_gcd=1,use_while_casting=1,name=fire_blast_pooling,value=scorch_execute.active&action.fire_blast.full_recharge_time>3*gcd.max,if=!variable.fire_blast_pooling&talent.sun_kings_blessing
+
+      if not VarFireBlastPooling and game_api.hasTalentEntry(talents.SunKingsBlessing) then
+        VarFireBlastPooling = ScorchExecuteActive() and state.FireblastFullRechargeTime > 3 * GCDMax
+      end
+      -- Note: fire_blast from below. Moved above shifting_power, as it's intended to be used during it's cast.
+
+      if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (game_api.unitChannelingSpellID(state.currentPlayer) == spells.ShiftingPower and (state.FireBlastFullRechargeTime < ShiftingPowerTickReduction or game_api.hasTalentEntry(talents.SunKingsBlessing) and state.HeatingUpBuff)) then
+            print("Fire Blast - Firestarter Fire Blast")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+      end
+      -- shifting_power,if=buff.combustion.down&(!improved_scorch.active|debuff.improved_scorch.remains>cast_time+action.scorch.cast_time&!buff.fury_of_the_sun_king.up)&!buff.hot_streak.react&buff.hyperthermia.down&(cooldown.phoenix_flames.charges<=1|cooldown.combustion.remains<20)
+
+      if CanCast(spells.ShiftingPower) then
+        if CombustionDown and (not ImprovedScorchActive() or game_api.unitAuraRemainingTime(state.currentTarget,auras.ImprovedScorch,true) > ShiftingPowerCastTime + ScorchCastTime and not game_api.currentPlayerHasAura(auras.FuryoftheSunKing,true)) and not state.HasHotStreak and not game_api.currentPlayerHasAura(auras.Hyperthermia,true) and (game_api.getChargeCountOnCooldown(spells.PhoenixFlames) <= 2 or game_api.getCooldownRemainingTime(spells.Combustion) < 20000) then
+            print("Casting Shifting Power - Main")
+            game_api.castSpell(spells.ShiftingPower)
+            return true
+        end
+      end
+      -- variable,name=phoenix_pooling,if=!talent.sun_kings_blessing,value=(variable.time_to_combustion+buff.combustion.duration-5<action.phoenix_flames.full_recharge_time+cooldown.phoenix_flames.duration-action.shifting_power.full_reduction*variable.shifting_power_before_combustion&variable.time_to_combustion<fight_remains|talent.sun_kings_blessing)&!talent.alexstraszas_fury
+
+      if not game_api.hasTalentEntry(talents.SunKingsBlessing) then
+        VarPhoenixPooling = (VarTimeToCombustion + 5000 < state.PhoenixFlamesFullRechargeTime + 25000 - (ShiftingPowerFullReduction()*1000) * API.num(VarShiftingPowerBeforeCombustion) and VarTimeToCombustion < state.FightRemains or game_api.hasTalentEntry(talents.SunKingsBlessing)) and not game_api.hasTalentEntry(talents.AlextraszasFury)
+      end
+      -- fire_blast,use_off_gcd=1,use_while_casting=1,if=!variable.fire_blast_pooling&variable.time_to_combustion>0&active_enemies>=variable.hard_cast_flamestrike&!firestarter.active&!buff.hot_streak.react&(buff.heating_up.react&action.flamestrike.execute_remains<0.5|charges_fractional>=2)
+
+      if CanCastOGCD(spells.Fireblast,state.FireblastMaxCharges) then
+        if not state.FreeCastAvailable2 and (not VarFireBlastPooling and VarTimeToCombustion > 0 and EnemiesCount8ySplash >= VarHardCastFlamestrike and not FirestarterActive() and not state.HasHotStreak and (state.HeatingUpBuff and state.castingID == spells.Flamestrike and ExecuteRemains(spells.Flamestrike) < 30 or state.FireblastFractional >= 2)) then
+            print("Fire Blast - Main")
+            game_api.castSpell(spells.Fireblast)
+            lastCastTime[spells.Fireblast] = game_api.currentTime()
+            return true
+        end
+      end
+      -- call_action_list,name=firestarter_fire_blasts,if=buff.combustion.down&firestarter.active&variable.time_to_combustion>0
+
+      if CombustionDown and FirestarterActive() and VarTimeToCombustion > 0 then
+        local ShouldReturn = FirestarterFireBlasts(); if ShouldReturn then return ShouldReturn; end
+      end
+      -- fire_blast,use_while_casting=1,if=action.shifting_power.executing&(full_recharge_time<action.shifting_power.tick_reduction|talent.sun_kings_blessing&buff.heating_up.react)
+      -- Note: Moved above shifting_power, as this is intended to be used during its cast.
+      -- call_action_list,name=standard_rotation,if=variable.time_to_combustion>0&buff.combustion.down
+      if VarTimeToCombustion > 0 and CombustionDown then
+        local ShouldReturn = StandardRotation(); if ShouldReturn then return ShouldReturn; end
+      end
+  
+    
+    
+    
+    
+    return false
+end
+
+
+
+
+
+
+
+
+function useWeapon()
+    if state.TargetCheck and API.UseWeapon(auras.Combustion, false, settings.Cooldown) then
+        return true
+    end
+    return false
+end
+
+function SpellSteal()
+    if CanCast(spells.SpellSteal) and state.currentManaPercent > 25 then
+        for _, unit in ipairs(state.getUnits) do
+            for auraId, _ in pairs(cLists.spellSteal) do
+                if game_api.unitHasAura(unit, auraId, false) and not game_api.currentPlayerHasAura(auraId, false) and game_api.distanceToUnit(unit) < 40 then
+                    print("Purging Enemy")
+                    game_api.castSpellOnFocus(spells.SpellSteal, unit)
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function RemoveCurse()
+    if CanCast(spells.RemoveCurse) and state.currentManaPercent > 25 then
+        for _, unit in ipairs(state.getUnits) do
+            for _, auraId in pairs(cLists.CurseList) do
+                if game_api.unitHasAura(unit, auraId, false) and game_api.distanceToUnit(unit) < 40 then
+                    print("Remove Curse Enemy")
+                    game_api.castSpellOnFocus(spells.RemoveCurse, unit)
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+
+
+
+
+--[[
+    Run on eatch engine tick if game has focus and is not loading
+]]
+function OnUpdate()
+    if not game_api.isSpec(137019) then
+        API.Debug("Not Fire Spec")
+        return
+    end
+    if game_api.getToggle("Pause") then
+        return
+    end
+
+    StateUpdate()
+    if game_api.currentPlayerIsMounted() or game_api.unitHealth(state.currentPlayer) <= 0 or game_api.unitChannelingSpellID(state.currentPlayer) == spells.ShiftingPower then
+        return
+    end
+    if not game_api.unitInCombat(game_api.getCurrentPlayer()) and not game_api.objectIsOnCooldown(211495) and game_api.canCastObject(211495) and game_api.currentPlayerAuraRemainingTime(393438,false) < 300000 then
+        print("Using Aug Rune")
+        game_api.castObject(211495)
+        return true
+    end
+    if state.StopCastLogic then
+        game_api.stopCast()
+        print("Stop Casting Logic")
+        return true -- stop cast logic
+    end
+    if game_api.unitInCombat(state.currentPlayer) then
+        if API.Interrupt("mage") then
+            return true
+        end
+        if GreaterInvis() then
+            return true
+        end
+        if game_api.getToggle(settings.dispel) then
+            if SpellSteal() then
+                return true
+            end
+            if RemoveCurse() then
+                return true
+            end
+            if Affix(spells.RemoveCurse, spells.Polymorph) then
+                return true
+            end
+        end
+        if state.CombustionDown and not state.channeling then
+            if useWeapon() then
+                return true
+            end
+        end
+        if Defense() then
+            return true
+        end
+    end
+    if not game_api.unitInCombat(state.currentPlayer) and CanCast(spells.BlazingBarrier)  and not state.HasDefensive   then
+        game_api.castSpell(spells.BlazingBarrier)
+        API.Debug("Blazing Barrier OOC")
+        return true
+    end
+    -- Auto retarget
+    if game_api.unitInCombat(state.currentPlayer) and game_api.getSetting(settings.autoRetarget) then
+        if state.currentTarget == "00" or (game_api.unitHealthPercent(state.currentTarget) == 0 and state.currentTarget ~= "00") or not API.IsFacing(state.currentTarget) or not API.IsInRange(38,state.currentTarget) then
+            local newTarget = UnitWithHighestHealth()
+            if newTarget then
+                print("Switching Target")
+                game_api.setTarget(newTarget)
+            end
+        end
+    end
+    local engagementType = game_api.getSetting(settings.engagementType)
+    if engagementType == "Player In Combat" then
+        if game_api.unitInCombat(state.currentPlayer) and state.TargetCheck then
+            if DPS() then
+                return true
+            end
+        end
+    end
+    if engagementType == "Target In Combat" then
+        if (API.isInCombatOrHasNpcId(state.currentTarget, cLists.npcIdList) or API.isUnitDummy(state.currentTarget)) and state.TargetCheck then
+            if DPS() then
+                return true
+            end
+        end
+    end
+    if game_api.canCast(spells.ArcaneIntellect) and not game_api.currentPlayerHasAura(auras.ArcaneIntellect,false) then
+        API.Debug("Casting Arcane Intellect")
+        game_api.castSpellOnTarget(spells.ArcaneIntellect,state.currentPlayer)
+        return true
+    end
+
+end
